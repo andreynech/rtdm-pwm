@@ -1,0 +1,17 @@
+
+CFLAGS += -I/usr/include/xenomai/
+
+LDFLAGS += -lxenomai
+LDFLAGS += -lrtdm
+
+all: xeno-pwm-app
+
+xeno-pwm-app: xeno-pwm-app.o
+	$(CC) xeno-pwm-app.o $(LDFLAGS) -o xeno-pwm-app
+
+xeno-pwm-app.o: xeno-pwm-app.c
+	$(CC) -c $(CFLAGS) xeno-pwm-app.c
+
+clean:
+	rm -f xeno-pwm-app.o xeno-pwm-app
+
