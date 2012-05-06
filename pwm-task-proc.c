@@ -36,8 +36,11 @@
 #define RANGE_MAP100(c, d, x) (c + div100((d - c) * x))
 
 static int RC_NUM = 0;
-static rtdm_task_t pwm_task[8];
+static rtdm_timer_t up_timer;
+static rtdm_timer_t down_timer[8];
 static nanosecs_rel_t up_period[8];
+static uint8_t reconfigured[8];
+
 
 // Initialized with default pulse ranges
 static int ranges[8][2] = {
@@ -56,24 +59,44 @@ static void __iomem *gpio = NULL;
 
 
 void 
-pwm_task_proc(void *arg)
+pwm_up(rtdm_timer_t *timer)
 {
-  const int which = (int)arg;
+  size_t channel = 0; // TODO: should be looked up using timer parameter
+  int retval;
 
-  // Toggling the pins
-  for(;;)
+  //set_data_out has offset 0x94
+  iowrite32(0x40000000, gpio + 0x6094);
+  //rtdm_task_sleep(2000*1000);
+  //iowrite32(0x40000000, gpio + 0x6090);
+  //return;
+
+  if(reconfigured[channel])
     {
-      //set_data_out has offset 0x94
-      iowrite32(0x40000000, gpio + 0x6094);
-      if(0 != rtdm_task_sleep(up_period[which]))
-	rtdm_printk("PWM: rtdm_task_sleep() returns error\n");
+      reconfigured[channel] = 0;
+      rtdm_timer_stop(&down_timer[channel]);
+      retval = rtdm_timer_start(&down_timer[channel], 
+				up_period[channel], // we will use periodic timer
+				20000000,
+      				RTDM_TIMERMODE_RELATIVE);
 
-      //clear_data_out has offset 0x90
-      iowrite32(0x40000000, gpio + 0x6090);
-      if(0 != rtdm_task_wait_period())
-	rtdm_printk("PWM: rtdm_task_wait_period() returns error\n");
+      //rtdm_timer_stop_in_handler(&down_timer[channel]);
+      //retval = rtdm_timer_start_in_handler(&down_timer[channel], 
+      //				   0, // we will use periodic timer
+      //				   up_period[channel],
+      //				   RTDM_TIMERMODE_RELATIVE);
+      if(retval)
+	  rtdm_printk("PWM: error reconfiguring down-timer #%i: %i\n", 
+		      channel, retval);
     }
 
+}
+
+
+void 
+pwm_down(rtdm_timer_t *timer)
+{
+  //clear_data_out has offset 0x90
+  iowrite32(0x40000000, gpio + 0x6090);
 }
 
 
@@ -81,9 +104,11 @@ void
 setpwmwidth(int channel, int percentage)
 {
   //rtdm_printk("PWM: %i -> %i\n", channel, percentage);
+
   up_period[channel] = 1000 * RANGE_MAP100(ranges[channel][0], 
 					   ranges[channel][1], 
 					   percentage);
+  reconfigured[channel] = 1;
 }
 
 
@@ -114,6 +139,7 @@ initpwm(pwm_desc_t *channels, int nchannels)
       ranges[channels[i].channel][1] = channels[i].pwmMaxWidth;
       up_period[channels[i].channel] = 
         1000 * RANGE_MAP100(ranges[i][0], ranges[i][1], 50);
+      reconfigured[i] = 0;
     }
 
   rtdm_printk("PWM: pulse lengths initialized\n");
@@ -161,23 +187,35 @@ initpwm(pwm_desc_t *channels, int nchannels)
   // GPIO clear_irqenable2 is offset by 0x70 for each bank
   iowrite32(0x0000FFFF, gpio + 0x6070);
 
-  rtdm_printk("PWM: Starting PWM generation tasks.\n");
+  rtdm_printk("PWM: Starting PWM generation timers.\n");
+
+  retval = rtdm_timer_init(&up_timer, pwm_up, "up timer");
+  if(retval)
+    {
+      rtdm_printk("PWM: error initializing up-timer: %i\n", retval);
+      return retval;
+    }
 
   for(i = 0; i < RC_NUM; i++)
     {
-      retval = rtdm_task_init(&pwm_task[i], 
-			      "pwm-task",
-			      pwm_task_proc,
-			      0,
-			      RTDM_TASK_HIGHEST_PRIORITY,
-			      20000000); // 20ms period
+      retval = rtdm_timer_init(&down_timer[i], pwm_down, "down timer");
       if(retval)
 	{
-	  rtdm_printk("PWM: error creating RTDM task: %i\n", retval);
+	  rtdm_printk("PWM: error initializing down-timer #%i: %i\n", i, retval);
 	  return retval;
 	}
     }
-  rtdm_printk("PWM: RTDM tasks created\n");
+
+  retval = rtdm_timer_start(&up_timer, 
+			    20000000, // we will use periodic timer
+			    20000000, // 20ms period
+			    RTDM_TIMERMODE_RELATIVE);
+  if(retval)
+    {
+      rtdm_printk("PWM: error starting up-timer: %i\n", retval);
+      return retval;
+    }
+  rtdm_printk("PWM: timers created\n");
 
   return 0;
 }
@@ -187,7 +225,8 @@ void
 cleanuppwm(void)
 {
   int i = 0;
+  rtdm_timer_destroy(&up_timer);
   for(; i < RC_NUM; ++i)
-    rtdm_task_destroy(&pwm_task[i]);
+    rtdm_timer_destroy(&down_timer[i]);
   iounmap(gpio);
 }
